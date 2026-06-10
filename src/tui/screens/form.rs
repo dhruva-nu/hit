@@ -241,8 +241,15 @@ impl Screen for RequestForm {
         Action::None
     }
 
-    fn draw(&mut self, frame: &mut Frame, area: Rect, _ctx: &AppCtx) {
+    fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &AppCtx) {
         let mut area = area;
+
+        // No params and no body (plain GETs): show a request preview plus
+        // the docs instead of an empty screen.
+        if self.form.rows.is_empty() {
+            self.draw_request_preview(frame, area, ctx);
+            return;
+        }
 
         // Docs pane: endpoint description + declared/expected responses.
         if self.show_docs {
@@ -318,6 +325,59 @@ impl Screen for RequestForm {
 }
 
 impl RequestForm {
+    /// Shown when the endpoint takes no input at all: what will be sent,
+    /// whether auth is attached, and the endpoint docs.
+    fn draw_request_preview(&self, frame: &mut Frame, area: Rect, ctx: &AppCtx) {
+        let project = ctx.services.config.projects.get(&self.bundle.project);
+        let url = project
+            .map(|p| {
+                format!(
+                    "{}{}",
+                    p.base_url.as_str().trim_end_matches('/'),
+                    self.endpoint.path
+                )
+            })
+            .unwrap_or_else(|| self.endpoint.path.clone());
+
+        let mut lines = vec![
+            Line::raw(""),
+            Line::from(vec![
+                theme::method_badge(&self.endpoint.method),
+                Span::styled(format!(" {url}"), theme::bold(theme::text())),
+            ]),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "this endpoint takes no parameters and no body",
+                theme::dim(),
+            )),
+        ];
+
+        let has_auth = project.is_some_and(|p| p.auth.is_some());
+        let auth_line = match (self.endpoint.auth_required, has_auth) {
+            (true, true) => Span::styled(
+                "⚿ authenticated — your token will be attached",
+                Style::new().fg(theme::GREEN),
+            ),
+            (true, false) => Span::styled(
+                "⚿ endpoint requires auth, but this project has none configured",
+                Style::new().fg(theme::YELLOW),
+            ),
+            (false, _) => Span::styled("no auth required", theme::dim()),
+        };
+        lines.push(Line::from(auth_line));
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            Span::styled(" ctrl+s ", Style::new().fg(theme::CYAN).bg(theme::SEL_BG)),
+            Span::styled(" send the request", theme::soft()),
+        ]));
+
+        lines.push(Line::raw(""));
+        lines.push(widgets::rule(area.width));
+        lines.extend(widgets::endpoint_docs_lines(&self.endpoint));
+
+        frame.render_widget(Paragraph::new(lines), area);
+    }
+
     fn render_row(&self, i: usize, label_width: usize, width: u16) -> Line<'_> {
         let row = &self.form.rows[i];
         let is_cursor = i == self.form.cursor;

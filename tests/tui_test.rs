@@ -201,3 +201,22 @@ fn form_docs_toggle_shows_description_and_response() {
     assert!(rendered.contains("example 201 body"));
     assert!(rendered.contains("<string:email>"));
 }
+
+#[test]
+fn paramless_get_shows_request_preview_instead_of_empty_form() {
+    let ctx = &mut test_ctx();
+    let bundle = fixture_bundle();
+    let endpoint = bundle
+        .spec
+        .find_endpoint("health_health_get")
+        .unwrap()
+        .clone();
+    let mut screen = RequestForm::new(bundle, endpoint);
+
+    let rendered = draw(&mut screen, ctx);
+    assert!(rendered.contains("GET"));
+    assert!(rendered.contains("http://localhost:1/health"));
+    assert!(rendered.contains("no parameters and no body"));
+    assert!(rendered.contains("send the request"));
+    assert!(rendered.contains("Health check")); // docs fall back to summary
+}
