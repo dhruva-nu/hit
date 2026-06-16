@@ -349,25 +349,24 @@ impl Screen for RequestForm {
                 .as_ref()
                 .is_some_and(|p| matches!(p.state, PanelState::Done { .. }));
         let alt = key.modifiers.contains(KeyModifiers::ALT);
-        if panel_is_done || alt {
-            if let Some(panel) = &mut self.right_panel {
-                if self.panel_visible {
-                    match key.code {
-                        KeyCode::Up | KeyCode::Char('k') if panel_is_done || alt => {
-                            if let PanelState::Done { scroll, .. } = &mut panel.state {
-                                *scroll = scroll.saturating_sub(1);
-                            }
-                            return Action::None;
-                        }
-                        KeyCode::Down | KeyCode::Char('j') if panel_is_done || alt => {
-                            if let PanelState::Done { scroll, .. } = &mut panel.state {
-                                *scroll = scroll.saturating_add(1);
-                            }
-                            return Action::None;
-                        }
-                        _ => {}
+        if (panel_is_done || alt)
+            && self.panel_visible
+            && let Some(panel) = &mut self.right_panel
+        {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') if panel_is_done || alt => {
+                    if let PanelState::Done { scroll, .. } = &mut panel.state {
+                        *scroll = scroll.saturating_sub(1);
                     }
+                    return Action::None;
                 }
+                KeyCode::Down | KeyCode::Char('j') if panel_is_done || alt => {
+                    if let PanelState::Done { scroll, .. } = &mut panel.state {
+                        *scroll = scroll.saturating_add(1);
+                    }
+                    return Action::None;
+                }
+                _ => {}
             }
         }
 
@@ -456,18 +455,16 @@ impl Screen for RequestForm {
             request_seq,
             result,
         } = msg
+            && let Some(panel) = &mut self.right_panel
+            && panel.request_seq == Some(*request_seq)
         {
-            if let Some(panel) = &mut self.right_panel {
-                if panel.request_seq == Some(*request_seq) {
-                    panel.state = match result {
-                        Ok(response) => PanelState::Done {
-                            response: response.clone(),
-                            scroll: 0,
-                        },
-                        Err(msg) => PanelState::Error(msg.clone()),
-                    };
-                }
-            }
+            panel.state = match result {
+                Ok(response) => PanelState::Done {
+                    response: response.clone(),
+                    scroll: 0,
+                },
+                Err(msg) => PanelState::Error(msg.clone()),
+            };
         }
         Action::None
     }
@@ -590,19 +587,19 @@ impl RequestForm {
                 self.panel_visible = false;
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                if let Some(panel) = &mut self.right_panel {
-                    if let PanelState::Picker { selected } = &mut panel.state {
-                        *selected = selected.saturating_sub(1);
-                    }
+                if let Some(panel) = &mut self.right_panel
+                    && let PanelState::Picker { selected } = &mut panel.state
+                {
+                    *selected = selected.saturating_sub(1);
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if let Some(panel) = &mut self.right_panel {
-                    if let PanelState::Picker { selected } = &mut panel.state {
-                        let max = panel.get_endpoints.len().saturating_sub(1);
-                        if *selected < max {
-                            *selected += 1;
-                        }
+                if let Some(panel) = &mut self.right_panel
+                    && let PanelState::Picker { selected } = &mut panel.state
+                {
+                    let max = panel.get_endpoints.len().saturating_sub(1);
+                    if *selected < max {
+                        *selected += 1;
                     }
                 }
             }
