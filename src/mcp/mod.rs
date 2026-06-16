@@ -3,21 +3,22 @@
 //!
 //! stdout is protocol — logging goes to file only (set up in main).
 
-use std::collections::BTreeMap;
+mod exec;
+mod params;
+mod tools;
+
 use std::sync::Arc;
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ErrorData, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
-use schemars::JsonSchema;
-use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::auth::{AuthManager, DenyInteractor};
-use crate::error::HitError;
-use crate::http::{RequestArgs, RequestExecutor};
+use crate::AppServices;
 use crate::model::build_template;
-use crate::{AppServices, config, spec};
+
+use params::{EndpointParams, ExecuteParams, ListEndpointsParams, ProjectParam};
+use tools::tool_error;
 
 pub async fn serve(services: AppServices) -> i32 {
     let server = HitpointServer {
@@ -41,77 +42,8 @@ struct HitpointServer {
     services: Arc<AppServices>,
 }
 
-fn tool_error(error: HitError) -> ErrorData {
-    ErrorData::invalid_params(error.to_string(), Some(json!({"kind": error.kind()})))
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct ProjectParam {
-    /// Registered project name (see list_projects).
-    project: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct ListEndpointsParams {
-    /// Registered project name (see list_projects).
-    project: String,
-    /// Restrict to one OpenAPI tag (see list_tags).
-    #[serde(default)]
-    tag: Option<String>,
-    /// Case-insensitive substring match on id, path, or summary.
-    #[serde(default)]
-    search: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct EndpointParams {
-    /// Registered project name (see list_projects).
-    project: String,
-    /// Endpoint id (operation_id) or "METHOD /path", e.g. "POST /users/".
-    endpoint: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct ExecuteParams {
-    /// Registered project name (see list_projects).
-    project: String,
-    /// Endpoint id (operation_id) or "METHOD /path", e.g. "POST /users/".
-    endpoint: String,
-    /// JSON request body. Call get_request_template first to learn the shape;
-    /// omit optional fields you don't need (listed in optional_paths).
-    #[serde(default)]
-    body: Option<Value>,
-    /// Values for the {placeholders} in the endpoint path.
-    #[serde(default)]
-    path_params: Option<BTreeMap<String, String>>,
-    /// Query-string parameters.
-    #[serde(default)]
-    query_params: Option<BTreeMap<String, String>>,
-    /// Extra request headers.
-    #[serde(default)]
-    headers: Option<BTreeMap<String, String>>,
-    /// Skip authentication for this request.
-    #[serde(default)]
-    no_auth: bool,
-}
-
 #[tool_router]
 impl HitpointServer {
-    async fn load_spec(&self, project_name: &str) -> Result<spec::LoadedSpec, ErrorData> {
-        let project = config::project(&self.services.config, project_name)
-            .map_err(|e| tool_error(e.into()))?;
-        spec::load(
-            &self.services.client,
-            project_name,
-            project,
-            self.services.settings(),
-            &self.services.paths.spec_cache_dir,
-            false,
-        )
-        .await
-        .map_err(|e| tool_error(e.into()))
-    }
-
     #[tool(
         name = "list_projects",
         description = "List the registered API projects this machine can test. Start here."
@@ -141,7 +73,7 @@ impl HitpointServer {
         &self,
         Parameters(params): Parameters<ProjectParam>,
     ) -> Result<CallToolResult, ErrorData> {
-        let loaded = self.load_spec(&params.project).await?;
+        let loaded = tools::load_spec(&self.services, &params.project).await?;
         let tags: Vec<Value> = loaded
             .spec
             .tags
@@ -167,56 +99,7 @@ impl HitpointServer {
         &self,
         Parameters(params): Parameters<ListEndpointsParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let loaded = self.load_spec(&params.project).await?;
-        let spec = &loaded.spec;
-
-        let in_tag: Option<Vec<&str>> = match &params.tag {
-            Some(tag_name) => Some(
-                spec.tag(tag_name)
-                    .map_err(|e| tool_error(e.into()))?
-                    .endpoint_ids
-                    .iter()
-                    .map(String::as_str)
-                    .collect(),
-            ),
-            None => None,
-        };
-        let needle = params.search.as_deref().map(str::to_ascii_lowercase);
-
-        let endpoints: Vec<Value> = spec
-            .endpoints
-            .iter()
-            .filter(|e| {
-                in_tag
-                    .as_ref()
-                    .map(|ids| ids.contains(&e.id.as_str()))
-                    .unwrap_or(true)
-            })
-            .filter(|e| {
-                needle.as_ref().is_none_or(|n| {
-                    e.id.to_ascii_lowercase().contains(n)
-                        || e.path.to_ascii_lowercase().contains(n)
-                        || e.summary
-                            .as_deref()
-                            .unwrap_or("")
-                            .to_ascii_lowercase()
-                            .contains(n)
-                })
-            })
-            .map(|e| {
-                json!({
-                    "id": e.id,
-                    "method": e.method,
-                    "path": e.path,
-                    "summary": e.summary,
-                    "tags": e.tags,
-                    "has_body": e.body.is_some(),
-                    "auth_required": e.auth_required,
-                    "deprecated": e.deprecated,
-                })
-            })
-            .collect();
-        Ok(CallToolResult::structured(json!({"endpoints": endpoints})))
+        tools::list_endpoints(&self.services, params).await
     }
 
     #[tool(
@@ -230,7 +113,7 @@ impl HitpointServer {
         &self,
         Parameters(params): Parameters<EndpointParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let loaded = self.load_spec(&params.project).await?;
+        let loaded = tools::load_spec(&self.services, &params.project).await?;
         let endpoint = loaded
             .spec
             .find_endpoint(&params.endpoint)
@@ -253,71 +136,7 @@ impl HitpointServer {
         &self,
         Parameters(params): Parameters<ExecuteParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let loaded = self.load_spec(&params.project).await?;
-        let endpoint = loaded
-            .spec
-            .find_endpoint(&params.endpoint)
-            .map_err(|e| tool_error(e.into()))?
-            .clone();
-        let project = config::project(&self.services.config, &params.project)
-            .map_err(|e| tool_error(e.into()))?;
-
-        let args = RequestArgs {
-            path_params: params.path_params.unwrap_or_default(),
-            query_params: params
-                .query_params
-                .unwrap_or_default()
-                .into_iter()
-                .collect(),
-            headers: params.headers.unwrap_or_default().into_iter().collect(),
-            body: params.body,
-            no_auth: params.no_auth,
-        };
-
-        let interactor = Arc::new(DenyInteractor {
-            instruction: format!(
-                "interactive auth required — run `hit login {}` in a terminal, then retry",
-                params.project
-            ),
-        });
-        let auth = AuthManager::for_project(
-            &params.project,
-            project,
-            self.services.settings(),
-            &self.services.paths,
-            self.services.client.clone(),
-            interactor,
-            true,
-        )
-        .map_err(|e| tool_error(e.into()))?;
-
-        // Never launch a browser from MCP mode.
-        if let Some(manager) = &auth
-            && !manager.supports_headless()
-            && manager.cached_expiry().is_none()
-            && !args.no_auth
-        {
-            return Err(tool_error(HitError::Auth(
-                crate::error::AuthError::InteractionRequired(format!(
-                    "project '{}' uses browser-based OAuth and has no cached token — run \
-                     `hit login {}` in a terminal first",
-                    params.project, params.project
-                )),
-            )));
-        }
-
-        let executor = RequestExecutor {
-            client: &self.services.client,
-            project,
-            auth: auth.as_ref(),
-        };
-        let response = executor
-            .execute(&endpoint, &args)
-            .await
-            .map_err(tool_error)?;
-        serde_json::to_value(&response)
-            .map(CallToolResult::structured)
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))
+        exec::execute_request(&self.services, params).await
     }
 }
 

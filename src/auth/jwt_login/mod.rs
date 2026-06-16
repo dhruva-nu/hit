@@ -1,13 +1,15 @@
 //! Local auth: POST credentials to the project's login endpoint, cache the
 //! returned JWT, and re-login shortly before its `exp`.
 
+mod jwt;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use base64::Engine;
 use serde_json::Value;
 use url::Url;
 
+use self::jwt::decode_jwt_exp;
 use super::{AuthProvider, Interactor, StoredToken, TokenStore, resolve_credential};
 use crate::config::{JwtLoginConfig, LoginContentType};
 use crate::error::AuthError;
@@ -79,14 +81,26 @@ impl JwtLoginProvider {
             url: url.clone(),
             message: e.to_string(),
         })?;
+        let stored = self.parse_login_response(response, &url).await?;
+        self.store.save(&self.project, &stored)?;
+        tracing::info!(project = self.project, "logged in");
+        Ok(stored)
+    }
+
+    /// Validate the HTTP response and pull the configured token out of its body.
+    async fn parse_login_response(
+        &self,
+        response: reqwest::Response,
+        url: &str,
+    ) -> Result<StoredToken, AuthError> {
         let status = response.status();
         let body: Value = response.json().await.map_err(|e| AuthError::LoginFailed {
-            url: url.clone(),
+            url: url.to_string(),
             message: format!("non-JSON login response: {e}"),
         })?;
         if !status.is_success() {
             return Err(AuthError::LoginFailed {
-                url,
+                url: url.to_string(),
                 message: format!("{status}: {body}"),
             });
         }
@@ -97,15 +111,12 @@ impl JwtLoginProvider {
             .ok_or_else(|| AuthError::TokenNotFound(self.config.token_json_pointer.clone()))?
             .to_string();
 
-        let stored = StoredToken {
+        Ok(StoredToken {
             expires_at_unix: decode_jwt_exp(&token),
             access_token: token,
             refresh_token: None,
             token_type: "Bearer".into(),
-        };
-        self.store.save(&self.project, &stored)?;
-        tracing::info!(project = self.project, "logged in");
-        Ok(stored)
+        })
     }
 }
 
@@ -135,38 +146,5 @@ impl AuthProvider for JwtLoginProvider {
 
     fn cached_expiry(&self) -> Option<u64> {
         self.store.load(&self.project)?.expires_at_unix
-    }
-}
-
-/// Read `exp` from a JWT payload without verifying the signature — we are
-/// the client, not the validator. Opaque (non-JWT) tokens return `None` and
-/// get no proactive refresh, only the 401-reactive path.
-pub fn decode_jwt_exp(token: &str) -> Option<u64> {
-    let payload = token.split('.').nth(1)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .ok()?;
-    let claims: Value = serde_json::from_slice(&bytes).ok()?;
-    claims.get("exp")?.as_u64()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn decodes_exp_claim() {
-        // header {"alg":"none"} . payload {"exp":1900000000,"sub":"u"} . empty sig
-        let engine = &base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        let header = engine.encode(br#"{"alg":"none"}"#);
-        let payload = engine.encode(br#"{"exp":1900000000,"sub":"u"}"#);
-        let token = format!("{header}.{payload}.");
-        assert_eq!(decode_jwt_exp(&token), Some(1_900_000_000));
-    }
-
-    #[test]
-    fn opaque_token_has_no_expiry() {
-        assert_eq!(decode_jwt_exp("not-a-jwt"), None);
-        assert_eq!(decode_jwt_exp("a.b.c"), None);
     }
 }
