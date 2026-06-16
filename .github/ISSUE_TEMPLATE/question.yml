@@ -1,0 +1,31 @@
+name: Question
+description: Ask a question about setup, usage, or behavior
+labels: [question]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before asking, check the README and existing issues — your question may already be answered.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: What do you want to know?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: What have you tried?
+      description: Steps you've already taken or docs you've already read.
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment (if relevant)
+      description: Output of `hit --version`, OS, and terminal.
+      placeholder: |
+        hit version:
+        OS:
+        Terminal:

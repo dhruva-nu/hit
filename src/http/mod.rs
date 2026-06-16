@@ -131,6 +131,21 @@ fn attach_body(
         .map(|b| b.content_type.as_str())
         .unwrap_or("application/json");
 
+    // Some MCP clients deliver the JSON body as a stringified blob rather than a
+    // JSON object. Unwrap one layer of string encoding so we don't send a
+    // double-encoded body (which servers reject as "not a valid object").
+    let parsed;
+    let body = match body {
+        Value::String(s) => match serde_json::from_str::<Value>(s) {
+            Ok(v) if !v.is_string() => {
+                parsed = v;
+                &parsed
+            }
+            _ => body,
+        },
+        _ => body,
+    };
+
     if content_type == "application/x-www-form-urlencoded" {
         let map = body.as_object().ok_or_else(|| {
             RequestError::InvalidBody("form-encoded endpoints need a JSON object body".into())
