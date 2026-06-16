@@ -2,12 +2,20 @@
 //! keyring backend is feature-gated and falls back to files on any error so
 //! headless Linux without a Secret Service never crashes.
 
+mod file;
+#[cfg(feature = "keyring")]
+mod keyring;
+
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::TokenStoreKind;
 use crate::error::AuthError;
+
+pub use file::FileStore;
+#[cfg(feature = "keyring")]
+pub use keyring::KeyringStore;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredToken {
@@ -53,15 +61,13 @@ pub fn new_token_store(
     token_dir: PathBuf,
 ) -> Result<Box<dyn TokenStore>, AuthError> {
     match kind {
-        TokenStoreKind::File => Ok(Box::new(FileStore { dir: token_dir })),
+        TokenStoreKind::File => Ok(Box::new(FileStore::new(token_dir))),
         TokenStoreKind::Keyring => keyring_store().ok_or_else(|| {
             AuthError::Store(
                 "token_store = \"keyring\" but this build lacks the 'keyring' feature".into(),
             )
         }),
-        TokenStoreKind::Auto => {
-            Ok(keyring_store().unwrap_or(Box::new(FileStore { dir: token_dir })))
-        }
+        TokenStoreKind::Auto => Ok(keyring_store().unwrap_or(Box::new(FileStore::new(token_dir)))),
     }
 }
 
@@ -75,98 +81,6 @@ fn keyring_store() -> Option<Box<dyn TokenStore>> {
     None
 }
 
-/// JSON files under the data dir, one per project, mode 0600 (dir 0700).
-pub struct FileStore {
-    dir: PathBuf,
-}
-
-impl FileStore {
-    fn path(&self, project: &str) -> PathBuf {
-        self.dir.join(format!("{project}.json"))
-    }
-
-    fn ensure_dir(&self) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.dir)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700))?;
-        }
-        Ok(())
-    }
-}
-
-impl TokenStore for FileStore {
-    fn load(&self, project: &str) -> Option<StoredToken> {
-        let raw = std::fs::read_to_string(self.path(project)).ok()?;
-        serde_json::from_str(&raw).ok()
-    }
-
-    fn save(&self, project: &str, token: &StoredToken) -> Result<(), AuthError> {
-        let write = || -> std::io::Result<()> {
-            self.ensure_dir()?;
-            let path = self.path(project);
-            let tmp = path.with_extension("json.tmp");
-            std::fs::write(&tmp, serde_json::to_vec(token)?)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-            }
-            std::fs::rename(&tmp, &path)
-        };
-        write().map_err(|e| AuthError::Store(format!("writing token file: {e}")))
-    }
-
-    fn clear(&self, project: &str) -> Result<(), AuthError> {
-        match std::fs::remove_file(self.path(project)) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(AuthError::Store(format!("removing token file: {e}"))),
-        }
-    }
-}
-
-/// OS keychain via the `keyring` crate. Any backend error degrades to a
-/// logged failure (load -> None) so callers can fall back to re-login.
-#[cfg(feature = "keyring")]
-pub struct KeyringStore;
-
-#[cfg(feature = "keyring")]
-impl KeyringStore {
-    fn entry(project: &str) -> Result<keyring::Entry, AuthError> {
-        keyring::Entry::new("hitpoint", project)
-            .map_err(|e| AuthError::Store(format!("keyring: {e}")))
-    }
-}
-
-#[cfg(feature = "keyring")]
-impl TokenStore for KeyringStore {
-    fn load(&self, project: &str) -> Option<StoredToken> {
-        let entry = Self::entry(project).ok()?;
-        let raw = entry.get_password().ok()?;
-        serde_json::from_str(&raw).ok()
-    }
-
-    fn save(&self, project: &str, token: &StoredToken) -> Result<(), AuthError> {
-        let entry = Self::entry(project)?;
-        let raw = serde_json::to_string(token)
-            .map_err(|e| AuthError::Store(format!("serializing token: {e}")))?;
-        entry
-            .set_password(&raw)
-            .map_err(|e| AuthError::Store(format!("keyring: {e}")))
-    }
-
-    fn clear(&self, project: &str) -> Result<(), AuthError> {
-        let entry = Self::entry(project)?;
-        match entry.delete_credential() {
-            Ok(()) => Ok(()),
-            Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(AuthError::Store(format!("keyring: {e}"))),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,9 +88,7 @@ mod tests {
     #[test]
     fn file_store_round_trip_and_permissions() {
         let dir = tempfile::tempdir().unwrap();
-        let store = FileStore {
-            dir: dir.path().join("tokens"),
-        };
+        let store = FileStore::new(dir.path().join("tokens"));
         let token = StoredToken {
             access_token: "abc".into(),
             refresh_token: None,

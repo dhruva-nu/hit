@@ -1,5 +1,6 @@
 //! Core domain model: projects, parsed API specs, endpoints, templates.
 
+mod example;
 mod schema_node;
 mod template;
 
