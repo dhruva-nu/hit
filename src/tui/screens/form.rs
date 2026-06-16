@@ -191,14 +191,12 @@ impl RequestForm {
 
         let endpoint = self.bundle.spec.endpoints[selected_idx].clone();
 
-        let limit_param = endpoint
-            .params_in(ParamLocation::Query)
-            .find(|p| {
-                matches!(
-                    p.name.as_str(),
-                    "limit" | "per_page" | "page_size" | "page_limit"
-                )
-            });
+        let limit_param = endpoint.params_in(ParamLocation::Query).find(|p| {
+            matches!(
+                p.name.as_str(),
+                "limit" | "per_page" | "page_size" | "page_limit"
+            )
+        });
         let limit_injected = limit_param.is_some();
         let query_params = match limit_param {
             Some(p) => vec![(p.name.clone(), "20".to_string())],
@@ -490,11 +488,9 @@ impl Screen for RequestForm {
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &AppCtx) {
         // Split horizontally when the reference panel is open.
         let (form_area, panel_area_opt) = if self.panel_visible && self.right_panel.is_some() {
-            let [left, right] = Layout::horizontal([
-                Constraint::Percentage(56),
-                Constraint::Percentage(44),
-            ])
-            .areas(area);
+            let [left, right] =
+                Layout::horizontal([Constraint::Percentage(56), Constraint::Percentage(44)])
+                    .areas(area);
             (left, Some(right))
         } else {
             (area, None)
@@ -656,10 +652,7 @@ impl RequestForm {
                             Span::styled(e.path.clone(), theme::soft()),
                         ];
                         if let Some(summary) = &e.summary {
-                            spans.push(Span::styled(
-                                format!("  {summary}"),
-                                theme::dim(),
-                            ));
+                            spans.push(Span::styled(format!("  {summary}"), theme::dim()));
                         }
                         ListItem::new(Line::from(spans))
                     })
@@ -744,10 +737,7 @@ impl RequestForm {
                     )));
                 }
 
-                frame.render_widget(
-                    Paragraph::new(lines).scroll((*scroll, 0)),
-                    content_area,
-                );
+                frame.render_widget(Paragraph::new(lines).scroll((*scroll, 0)), content_area);
             }
         }
     }
